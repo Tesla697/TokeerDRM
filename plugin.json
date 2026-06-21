@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/SteamClientHomebrew/Millennium/main/src/system/plugin-schema.json",
+  "name": "TokeerDRM",
+  "common_name": "TokeerDRM",
+  "description": "Apply Denuvo activation codes directly from your Steam game properties.",
+  "version": "1.1.0",
+  "useBackend": true,
+  "backendType": "lua",
+  "include": [".millennium"]
+}
