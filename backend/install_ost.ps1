@@ -17,6 +17,19 @@ function Get-LatestOstTag {
 function Set-OstVersionMarker($steam, $tag) {
     if ($steam -and $tag) { try { [IO.File]::WriteAllText((Join-Path $steam $OstVersionFile), [string]$tag) } catch {} }
 }
+# True only if the dwmapi/xinput1_4 proxies belong to OpenSteamTool/mktl (they
+# reference its core). SteamTools' proxies don't — so this tells "OST active" from
+# "SteamTools active despite OST files present" (code 00). When false we must do a
+# full install so OST's proxies OVERWRITE SteamTools'.
+function Test-ProxyIsEngine($steam) {
+    $present = @('dwmapi.dll','xinput1_4.dll') | Where-Object { Test-Path (Join-Path $steam $_) }
+    if (-not $present) { return $false }
+    foreach ($d in $present) {
+        try { $txt = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $steam $d))) } catch { return $false }
+        if ($txt -notmatch 'OpenSteamTool' -and $txt -notmatch 'mktl') { return $false }
+    }
+    return $true
+}
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
 $Host.UI.RawUI.WindowTitle = "TokeerDRM — OpenSteamTool setup"
@@ -42,7 +55,9 @@ Write-Host "[+] Steam: $steam" -ForegroundColor Green
 $haveCore   = (Test-Path (Join-Path $steam "OpenSteamTool.dll")) -or (Test-Path (Join-Path $steam "mktl.dll"))
 $haveHijack = (Test-Path (Join-Path $steam "dwmapi.dll")) -and (Test-Path (Join-Path $steam "xinput1_4.dll"))
 $isMktl     = Test-Path (Join-Path $steam "mktl.dll")
-if ($haveCore -and $haveHijack -and -not $Force) {
+# Config-only only when OST's proxies are genuinely active. If SteamTools owns them,
+# fall through to a full install so OST's proxies overwrite SteamTools' ("switch to OST").
+if ($haveCore -and $haveHijack -and -not $Force -and (Test-ProxyIsEngine $steam)) {
     Write-Host "[*] OpenSteamTool already installed — finishing setup (config only)..." -ForegroundColor Cyan
     try { Add-MpPreference -ExclusionPath $steam -ErrorAction SilentlyContinue } catch {}
     if (-not $isMktl) {

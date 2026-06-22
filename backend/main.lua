@@ -397,6 +397,29 @@ local function hijack_present()
     return file_exists(dir .. "\\dwmapi.dll") and file_exists(dir .. "\\xinput1_4.dll")
 end
 
+-- True only if the dwmapi/xinput1_4 proxies belong to a Denuvo engine (OpenSteamTool
+-- or the mktl fork) — they reference its core. SteamTools uses the same proxy names
+-- but its DLLs reference neither, so when SteamTools is active these are SteamTools'
+-- and the registry ticket is never read (code 00) even with OpenSteamTool.dll present.
+local function proxy_is_engine()
+    local dir = steam_dir()
+    local present = {}
+    for _, d in ipairs({ "dwmapi.dll", "xinput1_4.dll" }) do
+        if file_exists(dir .. "\\" .. d) then present[#present + 1] = d end
+    end
+    if #present == 0 then return false end
+    for _, d in ipairs(present) do
+        local f = io.open(dir .. "\\" .. d, "rb")
+        if not f then return false end
+        local data = f:read("*a") or ""
+        f:close()
+        if not (data:find("OpenSteamTool", 1, true) or data:find("mktl", 1, true)) then
+            return false  -- SteamTools' / stock proxy → OST isn't the active engine
+        end
+    end
+    return true
+end
+
 local function read_ost_marker()
     local f = io.open(steam_dir() .. "\\" .. OST_MARKER, "r")
     if not f then return nil end
@@ -425,7 +448,7 @@ end
 -- "update" (newer OST release → auto) | "none"
 local function ost_action()
     local has_core, core = engine_present()
-    local ready  = has_core and hijack_present() and config_ok(core)
+    local ready  = has_core and hijack_present() and config_ok(core) and proxy_is_engine()
     local marker = read_ost_marker()
     if not ready then return (marker and "repair" or "install") end
     local latest = latest_ost_tag()
@@ -623,7 +646,7 @@ function EngineStatus()
         launch_install(action == "update")
     end
     local ok, core = engine_present()
-    local ready = ok and hijack_present() and config_ok(core)
+    local ready = ok and hijack_present() and config_ok(core) and proxy_is_engine()
     return json.encode({ installed = ok, ready = ready, engine = core or nil, action = action })
 end
 
