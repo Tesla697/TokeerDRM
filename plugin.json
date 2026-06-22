@@ -3,6 +3,7 @@
   "name": "TokeerDRM",
   "common_name": "TokeerDRM",
   "description": "Apply Denuvo activation codes directly from your Steam game properties.",
+  "thumbnail": "https://raw.githubusercontent.com/Tesla697/TokeerDRM/main/logo.png",
   "version": "1.1.0",
   "useBackend": true,
   "backendType": "lua",
