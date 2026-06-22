@@ -30,6 +30,26 @@ function Test-ProxyIsEngine($steam) {
     }
     return $true
 }
+# Neutralise every OTHER unlock engine so ONLY OpenSteamTool is active. Without this,
+# a leftover core (e.g. cloud_redirect.dll) stays on disk and managers like LuaTools
+# keep showing CloudRedirect as ACTIVE and ask the user to switch manually — this is
+# what their "Switch to OpenSteamTool" button does. Cores go by name; foreign proxies
+# only when their bytes tie them to a known unlocker (never a real Steam DLL).
+function Disable-ForeignEngines($steam) {
+    foreach ($core in 'mktl.dll','cloud_redirect.dll') {
+        $p = Join-Path $steam $core
+        if (Test-Path $p) { Move-Item $p "$p.bak" -Force -ErrorAction SilentlyContinue }
+    }
+    foreach ($proxy in 'hid.dll','version.dll','winhttp.dll') {
+        $p = Join-Path $steam $proxy
+        if (-not (Test-Path $p)) { continue }
+        try { $txt = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($p)) } catch { continue }
+        if ($txt -match 'OpenSteamTool' -or $txt -match 'mktl') { continue }
+        if ($txt -match 'cloud_redirect|SteamTools|steamtools|stplug|LuaTools|luatools') {
+            Move-Item $p "$p.bak" -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
 $Host.UI.RawUI.WindowTitle = "TokeerDRM — OpenSteamTool setup"
@@ -60,6 +80,8 @@ $isMktl     = Test-Path (Join-Path $steam "mktl.dll")
 if ($haveCore -and $haveHijack -and -not $Force -and (Test-ProxyIsEngine $steam)) {
     Write-Host "[*] OpenSteamTool already installed — finishing setup (config only)..." -ForegroundColor Cyan
     try { Add-MpPreference -ExclusionPath $steam -ErrorAction SilentlyContinue } catch {}
+    # Clear any leftover foreign core so other managers stop showing it as active.
+    Disable-ForeignEngines $steam
     if (-not $isMktl) {
         $tomlPath = Join-Path $steam "opensteamtool.toml"
         $needsLua = $true
@@ -125,7 +147,7 @@ Start-Sleep 2
 # 4. back up the current engine
 $backup = Join-Path $steam "tokeer-engine-backup"
 New-Item -ItemType Directory -Force -Path $backup | Out-Null
-foreach ($f in "dwmapi.dll","xinput1_4.dll","mktl.dll","OpenSteamTool.dll","opensteamtool.toml") {
+foreach ($f in "dwmapi.dll","xinput1_4.dll","mktl.dll","cloud_redirect.dll","hid.dll","OpenSteamTool.dll","opensteamtool.toml") {
     $src = Join-Path $steam $f
     if (Test-Path $src) { Copy-Item $src (Join-Path $backup $f) -Force -ErrorAction SilentlyContinue }
 }
@@ -142,9 +164,10 @@ foreach ($f in "dwmapi.dll","xinput1_4.dll","OpenSteamTool.dll") {
 }
 Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
-# 6. disable any old core so the hijack DLLs load OpenSteamTool.dll
-$mktl = Join-Path $steam "mktl.dll"
-if (Test-Path $mktl) { Move-Item $mktl "$mktl.bak" -Force -ErrorAction SilentlyContinue }
+# 6. disable every competing engine (mktl, CloudRedirect, a SteamTools proxy…) so the
+#    hijack DLLs only load OpenSteamTool.dll AND other managers stop showing their
+#    backend as active — the actual "switch to OST".
+Disable-ForeignEngines $steam
 
 # 7. point OST at the existing stplug-in library
 @"
