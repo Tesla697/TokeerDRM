@@ -45,7 +45,9 @@ function Disable-ForeignEngines($steam) {
         if (-not (Test-Path $p)) { continue }
         try { $txt = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($p)) } catch { continue }
         if ($txt -match 'OpenSteamTool' -or $txt -match 'mktl') { continue }
-        if ($txt -match 'cloud_redirect|SteamTools|steamtools|stplug|LuaTools|luatools') {
+        # SteamTools' hid.dll has no "SteamTools" string — fingerprint it by its update
+        # hosts (steamui.com / stools.oss) and typo'd IPC class "Vale_SteamIPC".
+        if ($txt -match 'cloud_redirect|SteamTools|steamtools|stplug|LuaTools|luatools|steamui\.com|stools\.oss|Vale_SteamIPC') {
             Move-Item $p "$p.bak" -Force -ErrorAction SilentlyContinue
         }
     }
