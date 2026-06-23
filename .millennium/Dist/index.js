@@ -304,10 +304,30 @@ function wirePanel(panel, appId) {
 <div class="tdrm-card" style="text-align:center">
   <div class="tdrm-card-title">⬆ Update required</div>
   <div class="tdrm-card-desc">Version ${v.latest} is out — you're on ${v.current}. Update the plugin to keep using TokeerDRM.</div>
-  <button class="tdrm-btn" id="tdrm-update-btn">Download latest</button>
+  <button class="tdrm-btn" id="tdrm-update-btn">Update now</button>
+  <div class="tdrm-status" id="tdrm-update-status" style="margin-top:10px"></div>
 </div>`;
                 const ub = panel.querySelector("#tdrm-update-btn");
-                if (ub) ub.addEventListener("click", () => callBackend("OpenUrl", { url: v.url }));
+                const us = panel.querySelector("#tdrm-update-status");
+                if (ub) ub.addEventListener("click", async () => {
+                    ub.disabled = true;
+                    if (us) { us.className = "tdrm-status busy"; us.innerHTML = `<span class="tdrm-spin"></span><span>Updating…</span>`; }
+                    try {
+                        // In-place update within Steam — downloads + swaps the plugin, restarts Steam.
+                        const r = await callBackend("UpdatePlugin", {});
+                        if (r && r.success) {
+                            if (us) { us.className = "tdrm-status ok"; us.textContent = r.message || "Updating… Steam will restart."; }
+                        } else {
+                            if (us) { us.className = "tdrm-status err"; us.textContent = (r && r.error) || "Update failed."; }
+                            // fall back to the GitHub page so they're never stuck
+                            callBackend("OpenUrl", { url: v.url });
+                            ub.disabled = false;
+                        }
+                    } catch (e) {
+                        if (us) { us.className = "tdrm-status err"; us.textContent = "Update failed: " + e; }
+                        ub.disabled = false;
+                    }
+                });
             }
         } catch (_) { /* offline → don't block */ }
     })();
@@ -361,6 +381,13 @@ function wirePanel(panel, appId) {
             codeInput.value = "";
         } else {
             setStatus(redeemStatus, "err", result.error || "Unknown error");
+            // Engine isn't set up → surface the repair/setup box so they can fix it,
+            // and keep redeem locked until they do (the code was NOT consumed).
+            if (result.engine_fix) {
+                if (engineBox) engineBox.style.display = "block";
+                if (engineMsg) engineMsg.textContent = result.error || "Finish OpenSteamTool setup, then redeem.";
+                if (engineBtn) engineBtn.disabled = false;
+            }
         }
         applyBtn.disabled = false;
     });

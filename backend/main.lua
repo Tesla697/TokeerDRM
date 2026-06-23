@@ -45,7 +45,7 @@ local function load_server_url()
 end
 
 local SERVER_URL = load_server_url()
-local PLUGIN_VERSION = "1.0.5"               -- bump on every release
+local PLUGIN_VERSION = "1.0.6"               -- bump on every release
 local UPDATE_REPO    = "Tesla697/TokeerDRM"  -- latest release here force-gates the plugin
 
 -- ── FFI: Windows Registry (advapi32) ─────────────────────────────────────────
@@ -383,6 +383,13 @@ local function find_install_script()
     return nil
 end
 
+local function find_update_script()
+    for _, c in ipairs(plugin_candidates("backend\\update_plugin.ps1")) do
+        if file_exists(c) then return c end
+    end
+    return nil
+end
+
 -- ── OST version tracking + auto-heal classification ──────────────────────────
 -- Steam updates can wipe the OST hijack DLLs → redeemed tickets are ignored
 -- (Denuvo 88500000). We tag each install (shared marker the TokeerDRM app also
@@ -443,6 +450,16 @@ local function latest_ost_tag()
         end
     end
     return nil
+end
+
+-- True when OpenSteamTool is fully active: core present, hijack proxies in place,
+-- the toml/config points at config\stplug-in, AND the proxies are genuinely OST's.
+-- A redeemed Denuvo ticket does nothing without this, so RedeemCode gates on it.
+-- Returns: ready(bool), installed(bool), core(string|nil).
+local function engine_ready()
+    local ok, core = engine_present()
+    local ready = ok and hijack_present() and config_ok(core) and proxy_is_engine()
+    return ready, ok, core
 end
 
 -- "install" (first-time → manual) | "repair" (we set it up, now broken → auto) |
@@ -626,12 +643,25 @@ function VersionInfo()
     return json.encode(info)
 end
 
--- Open a URL in the system browser (for the "Download latest" button).
+-- Open a URL in the system browser (fallback for the "Download latest" button).
 function OpenUrl(url)
     if type(url) == "string" and #url > 0 then
         shell32.ShellExecuteA(nil, "open", url, nil, nil, 1)
     end
     return json.encode({ success = true })
+end
+
+-- In-place plugin update (no browser): download the latest release zip and extract it
+-- over this plugin folder, then restart Steam so Millennium reloads the new build.
+-- Elevated (runas) since the plugin can live under Program Files\Steam.
+function UpdatePlugin()
+    local script = find_update_script()
+    if not script then
+        return json.encode({ success = false, error = "Updater not found in the plugin folder." })
+    end
+    local params = '-NoProfile -ExecutionPolicy Bypass -File "' .. script .. '"'
+    shell32.ShellExecuteA(nil, "runas", "powershell.exe", params, nil, 1)  -- SW_SHOWNORMAL
+    return json.encode({ success = true, message = "Updating… approve the prompt. Steam will restart, then reopen the TokeerDRM tab." })
 end
 
 -- Is a Denuvo-capable engine (OpenSteamTool / mktl) active AND configured?
@@ -646,8 +676,7 @@ function EngineStatus()
         logger:info("TokeerDRM: auto-" .. action .. " OpenSteamTool")
         launch_install(action == "update")
     end
-    local ok, core = engine_present()
-    local ready = ok and hijack_present() and config_ok(core) and proxy_is_engine()
+    local ready, ok, core = engine_ready()
     return json.encode({ installed = ok, ready = ready, engine = core or nil, action = action })
 end
 
@@ -676,8 +705,19 @@ function RedeemCode(app_id, code)
         return json.encode({ success = false, error = "Missing app_id" })
     end
 
-    -- Note: the engine (OpenSteamTool) is checked once when the panel opens,
-    -- not on every redeem.
+    -- Gate on the engine: a Denuvo ticket only applies when OpenSteamTool is active and
+    -- pointed at config\stplug-in. If it isn't, writing the ticket is wasted — refuse and
+    -- tell the panel to surface repair/setup (engine_fix), WITHOUT burning the one-use code.
+    local ready, installed = engine_ready()
+    if not ready then
+        return json.encode({
+            success = false,
+            engine_fix = true,
+            error = installed
+                and "OpenSteamTool isn't set up yet — finish setup/repair on the TokeerDRM tab, then redeem."
+                or  "OpenSteamTool isn't installed — install it on the TokeerDRM tab, then redeem.",
+        })
+    end
 
     local result, err = http_post("/drm/redeem", { code = code, app_id = app_id })
     if not result then
@@ -830,4 +870,5 @@ return {
     InstallEngine      = InstallEngine,
     VersionInfo        = VersionInfo,
     OpenUrl            = OpenUrl,
+    UpdatePlugin       = UpdatePlugin,
 }
