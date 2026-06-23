@@ -66,13 +66,12 @@ trap {
     $msg = $_.Exception.Message
     Write-Host "`n[ERROR] $msg" -ForegroundColor Red
     if ($msg -match 'virus|potentially unwanted|unwanted software') {
-        $sp = if ($steam) { $steam } else { 'C:\Program Files (x86)\Steam' }
-        Write-Host "`nWindows Defender quarantined OpenSteamTool (it's flagged as PUA) and" -ForegroundColor Yellow
-        Write-Host "Tamper Protection is blocking the automatic exclusion. Fix it once:" -ForegroundColor Yellow
-        Write-Host "  1. Open  Windows Security > Virus & threat protection > Manage settings" -ForegroundColor Yellow
-        Write-Host "  2. Under Exclusions: Add an exclusion > Folder > $sp" -ForegroundColor Yellow
-        Write-Host "  3. Protection history: Restore any quarantined OpenSteamTool item" -ForegroundColor Yellow
-        Write-Host "  4. Run Set up again." -ForegroundColor Yellow
+        Write-Host "`nWindows Defender is blocking OpenSteamTool (PUA flag) and Tamper Protection" -ForegroundColor Yellow
+        Write-Host "is preventing the automatic exclusion. Easiest fix - install the engine with" -ForegroundColor Yellow
+        Write-Host "LuaTools, which ships an unflagged build:" -ForegroundColor Yellow
+        Write-Host "  1. Open LuaTools  ->  Mode  ->  Switch to OpenSteamTools" -ForegroundColor Cyan
+        Write-Host "  2. Come back to the TokeerDRM tab and redeem your code." -ForegroundColor Cyan
+        Write-Host "     (Get LuaTools at lua.tools)" -ForegroundColor DarkGray
     }
     Write-Host "Full log: $LogPath" -ForegroundColor Yellow
     try { Stop-Transcript | Out-Null } catch {}

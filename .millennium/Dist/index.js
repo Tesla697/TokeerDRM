@@ -304,8 +304,11 @@ function wirePanel(panel, appId) {
                         return;
                     }
                 } catch (_) { /* keep trying */ }
-                if (tries < 20) setTimeout(poll, 3000);          // ~60s
-                else if (engineBtn) engineBtn.disabled = false;  // give the button back to retry
+                if (tries < 20) { setTimeout(poll, 3000); return; }   // ~60s
+                // Didn't come ready - most often Windows Defender (Tamper Protection)
+                // blocking the PUA-flagged OST. Point them at LuaTools' unflagged build.
+                if (engineMsg) engineMsg.textContent = "If setup failed (often Windows Defender), install OpenSteamTools via LuaTools - Mode > Switch to OpenSteamTools (lua.tools) - then redeem here.";
+                if (engineBtn) engineBtn.disabled = false;             // allow a retry
             };
             setTimeout(poll, 4000);
         } catch (e) {
