@@ -105,6 +105,8 @@ $isMktl     = Test-Path (Join-Path $steam "mktl.dll")
 if ($haveCore -and $haveHijack -and -not $Force -and (Test-ProxyIsEngine $steam)) {
     Write-Host "[*] OpenSteamTool already installed - finishing setup (config only)..." -ForegroundColor Cyan
     try { Add-MpPreference -ExclusionPath $steam -ErrorAction SilentlyContinue } catch {}
+    # Create the stplug-in library if the user never had SteamTools (no-op if present).
+    New-Item -ItemType Directory -Force -Path (Join-Path $steam "config\stplug-in") | Out-Null
     # Clear any leftover foreign core so other managers stop showing it as active.
     Disable-ForeignEngines $steam
     if (-not $isMktl) {
@@ -207,7 +209,8 @@ Remove-Item $zip -Force -ErrorAction SilentlyContinue
 #    backend as active - the actual "switch to OST".
 Disable-ForeignEngines $steam
 
-# 7. point OST at the existing stplug-in library
+# 7. point OST at the stplug-in library (create it first if the user never had one)
+New-Item -ItemType Directory -Force -Path (Join-Path $steam "config\stplug-in") | Out-Null
 @"
 [manifest]
 url = "opensteamtool"
