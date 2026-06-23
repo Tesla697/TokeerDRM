@@ -56,6 +56,20 @@ function Disable-ForeignEngines($steam) {
 $ProgressPreference = 'SilentlyContinue'
 $Host.UI.RawUI.WindowTitle = "TokeerDRM — OpenSteamTool setup"
 
+# Log everything and KEEP THE WINDOW OPEN on failure. The plugin launches this elevated
+# & windowed; without this, any early error makes PowerShell "just flash and close" with
+# no clue why. On error we show the message + the log path and pause; the transcript is
+# always written so the user can share it.
+$LogPath = Join-Path $env:TEMP "tokeerdrm_ost_setup.log"
+try { Start-Transcript -Path $LogPath -Force | Out-Null } catch {}
+trap {
+    Write-Host "`n[ERROR] $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Full log: $LogPath" -ForegroundColor Yellow
+    try { Stop-Transcript | Out-Null } catch {}
+    Read-Host "`nSetup failed — press Enter to close"
+    exit 1
+}
+
 function Get-SteamPath {
     foreach ($r in @(
         @{P="HKCU:\Software\Valve\Steam";K="SteamPath"},
@@ -122,6 +136,7 @@ paths = ["config/stplug-in"]
     }
     Set-OstVersionMarker $steam (Get-LatestOstTag)
     Write-Host "`n[OK] OpenSteamTool configured. Redeem your code.`n" -ForegroundColor Green
+    try { Stop-Transcript | Out-Null } catch {}
     Start-Sleep 2
     exit 0
 }
@@ -190,4 +205,5 @@ Write-Host "[*] Restarting Steam..."
 Start-Process (Join-Path $steam "steam.exe")
 Start-Sleep 6
 Write-Host "`n[OK] OpenSteamTool installed. Sign in to Steam, then redeem your code.`n" -ForegroundColor Green
+try { Stop-Transcript | Out-Null } catch {}
 Start-Sleep 3

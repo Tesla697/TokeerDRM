@@ -9,6 +9,17 @@ $ProgressPreference = 'SilentlyContinue'
 $UA = @{ "User-Agent" = "TokeerDRM" }
 $Host.UI.RawUI.WindowTitle = "TokeerDRM — plugin update"
 
+# Log + keep the window open on failure so an error never "just flashes and closes".
+$LogPath = Join-Path $env:TEMP "tokeerdrm_plugin_update.log"
+try { Start-Transcript -Path $LogPath -Force | Out-Null } catch {}
+trap {
+    Write-Host "`n[ERROR] $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Full log: $LogPath" -ForegroundColor Yellow
+    try { Stop-Transcript | Out-Null } catch {}
+    Read-Host "`nUpdate failed — press Enter to close"
+    exit 1
+}
+
 function Get-SteamPath {
     foreach ($r in @(
         @{P="HKCU:\Software\Valve\Steam";K="SteamPath"},
@@ -58,4 +69,5 @@ Remove-Item $zip -Force -ErrorAction SilentlyContinue
 Write-Host "[*] Restarting Steam..."
 Start-Process (Join-Path $steam "steam.exe")
 Write-Host "`n[OK] Plugin updated to $($rel.tag_name). Open any game's Properties > TokeerDRM.`n" -ForegroundColor Green
+try { Stop-Transcript | Out-Null } catch {}
 Start-Sleep 3

@@ -288,6 +288,26 @@ function wirePanel(panel, appId) {
         try {
             const r = await callBackend("InstallEngine", {});
             engineMsg.textContent = (r && r.message) || "Setup launched.";
+            // Re-check the engine instead of leaving the button greyed forever. A
+            // config-only setup (OST already active) doesn't restart Steam, so the panel
+            // stays — poll until it's ready and unlock redeem. (A full install restarts
+            // Steam → the panel reloads fresh, so this loop simply ends with it.)
+            let tries = 0;
+            const poll = async () => {
+                tries++;
+                try {
+                    const es = await callBackend("EngineStatus", {});
+                    if (es && es.ready) {
+                        if (engineBox) engineBox.style.display = "none";
+                        if (applyBtn) { applyBtn.disabled = false; applyBtn.title = ""; }
+                        engineMsg.textContent = "OpenSteamTool ready — redeem your code.";
+                        return;
+                    }
+                } catch (_) { /* keep trying */ }
+                if (tries < 20) setTimeout(poll, 3000);          // ~60s
+                else if (engineBtn) engineBtn.disabled = false;  // give the button back to retry
+            };
+            setTimeout(poll, 4000);
         } catch (e) {
             engineMsg.textContent = "Setup couldn't start: " + e;
             engineBtn.disabled = false;
