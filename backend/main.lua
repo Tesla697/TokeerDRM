@@ -45,7 +45,7 @@ local function load_server_url()
 end
 
 local SERVER_URL = load_server_url()
-local PLUGIN_VERSION = "1.0.11"               -- bump on every release
+local PLUGIN_VERSION = "1.0.12"               -- bump on every release
 local UPDATE_REPO    = "Tesla697/TokeerDRM"  -- latest release here force-gates the plugin
 
 -- ── FFI: Windows Registry (advapi32) ─────────────────────────────────────────
@@ -395,10 +395,13 @@ end
 -- (Denuvo 88500000). We tag each install (shared marker the TokeerDRM app also
 -- writes) so we can tell a clobbered install (repair, auto-fix) from a never-set-up
 -- one (install, manual) and from an outdated build (update, auto-fix).
-local OST_REPO       = "OpenSteam001/OpenSteamTool"
+local OST_REPO        = "OpenSteam001/OpenSteamTool"
+local CUSTOM_OST_API  = "https://api.github.com/repos/Tesla697/OpenSteamTool/releases/latest"
+local CUSTOM_DLL_MARKER = ".tokeer_ost_custom"
 local OST_MARKER     = ".tokeer_ost_version"
 local _ost_latest    = { tag = nil, at = 0 }
 local _engine_healed = false  -- fire the elevated repair/update at most once per load
+local _dll_healed    = false  -- fire the custom DLL fix at most once per load
 
 local function hijack_present()
     local dir = steam_dir()
@@ -450,6 +453,13 @@ local function latest_ost_tag()
         end
     end
     return nil
+end
+
+-- True when our custom OpenSteamTool.dll is installed (marker + DLL both present).
+local function custom_dll_installed()
+    local dir = steam_dir()
+    return file_exists(dir .. "\\" .. CUSTOM_DLL_MARKER)
+       and file_exists(dir .. "\\OpenSteamTool.dll")
 end
 
 -- True when OpenSteamTool is fully active: core present, hijack proxies in place,
@@ -664,6 +674,106 @@ function UpdatePlugin()
     return json.encode({ success = true, message = "Updating… approve the prompt. Steam will restart, then reopen the TokeerDRM tab." })
 end
 
+function DllStatus()
+    local custom = custom_dll_installed()
+    local _, installed = engine_present()
+    return json.encode({
+        custom_installed = custom,
+        needs_fix = installed and not custom,
+    })
+end
+
+-- Install or replace OpenSteamTool with our custom fork build.
+-- If proxy DLLs (dwmapi/xinput1_4) are missing this is a full install;
+-- otherwise it's just a core-DLL swap. Either way, launches an elevated
+-- PowerShell script that kills Steam, downloads, installs, and restarts.
+-- Fire-and-forget (Steam and this plugin die when the script kills Steam).
+function FixDll()
+    local dir = steam_dir()
+    if not dir then
+        return json.encode({ success = false, error = "Steam directory not found" })
+    end
+
+    local tmp  = os.getenv("TEMP") or "C:\\Temp"
+    local ps_path = tmp .. "\\tokeer_fix_dll.ps1"
+    local edir = dir:gsub("'", "''")   -- escape single quotes (rare, but safe)
+
+    local ost_api = "https://api.github.com/repos/OpenSteam001/OpenSteamTool/releases/latest"
+
+    local ps = table.concat({
+        "$ErrorActionPreference = 'Stop'",
+        "try {",
+        "  $sd   = '" .. edir .. "'",
+        "  $hdr  = @{'User-Agent'='TokeerDRM'}",
+        "",
+        "  # Download our custom core DLL (from fork release)",
+        "  $crel  = Invoke-RestMethod -Uri '" .. CUSTOM_OST_API .. "' -Headers $hdr -UseBasicParsing",
+        "  $ca    = $crel.assets | Where-Object { $_.name -eq 'OpenSteamTool.dll' } | Select-Object -First 1",
+        "  $czip  = if (-not $ca) { $crel.assets | Where-Object { $_.name -like '*release*.zip' } | Select-Object -First 1 } else { $null }",
+        "  if (-not $ca -and -not $czip) { exit 1 }",
+        "  $tmpDll = \"$env:TEMP\\tokeer_ost_custom.dll\"",
+        "  if ($ca) {",
+        "    Invoke-WebRequest -Uri $ca.browser_download_url -OutFile $tmpDll -UseBasicParsing",
+        "  } else {",
+        "    $tmpCz = \"$env:TEMP\\tokeer_ost_custom.zip\"",
+        "    Invoke-WebRequest -Uri $czip.browser_download_url -OutFile $tmpCz -UseBasicParsing",
+        "    Add-Type -Assembly 'System.IO.Compression.FileSystem'",
+        "    $z = [IO.Compression.ZipFile]::OpenRead($tmpCz)",
+        "    $e = $z.Entries | Where-Object { $_.Name -eq 'OpenSteamTool.dll' } | Select-Object -First 1",
+        "    [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $tmpDll, $true)",
+        "    $z.Dispose()",
+        "  }",
+        "",
+        "  # If proxy DLLs are absent this is a fresh install — grab them from official OST.",
+        "  $needProxies = (-not (Test-Path \"$sd\\dwmapi.dll\")) -or (-not (Test-Path \"$sd\\xinput1_4.dll\"))",
+        "  if ($needProxies) {",
+        "    $orel = Invoke-RestMethod -Uri '" .. ost_api .. "' -Headers $hdr -UseBasicParsing",
+        "    $oa   = $orel.assets | Where-Object { $_.name -like '*release*.zip' } | Select-Object -First 1",
+        "    if ($oa) {",
+        "      $tmpOz = \"$env:TEMP\\tokeer_ost_official.zip\"",
+        "      Invoke-WebRequest -Uri $oa.browser_download_url -OutFile $tmpOz -UseBasicParsing",
+        "      Add-Type -Assembly 'System.IO.Compression.FileSystem'",
+        "      $z = [IO.Compression.ZipFile]::OpenRead($tmpOz)",
+        "      foreach ($e in ($z.Entries | Where-Object { $_.Name -in @('dwmapi.dll','xinput1_4.dll') })) {",
+        "        [IO.Compression.ZipFileExtensions]::ExtractToFile($e, \"$sd\\$($e.Name)\", $true)",
+        "      }",
+        "      $z.Dispose()",
+        "    }",
+        "  }",
+        "",
+        "  Stop-Process -Name steam -Force -ErrorAction SilentlyContinue",
+        "  Start-Sleep 3",
+        "  Add-MpPreference -ExclusionPath $sd -ErrorAction SilentlyContinue",
+        "  Copy-Item -Force $tmpDll \"$sd\\OpenSteamTool.dll\"",
+        "  Set-Content -Path \"$sd\\" .. CUSTOM_DLL_MARKER .. "\" -Value 'custom'",
+        "",
+        "  # Ensure toml points at config\\stplug-in",
+        "  $toml = \"$sd\\opensteamtool.toml\"",
+        "  if (-not (Test-Path $toml) -or -not ((Get-Content $toml -Raw 2>$null) -match 'stplug-in')) {",
+        "    \"`n[lua]`npaths = [\"\"config/stplug-in\"\"]\" | Add-Content $toml",
+        "  }",
+        "",
+        "  Start-Process \"$sd\\steam.exe\"",
+        "} catch { exit 1 }",
+    }, "\r\n")
+
+    local f = io.open(ps_path, "w")
+    if not f then
+        return json.encode({ success = false, error = "Couldn't write fix script to TEMP" })
+    end
+    f:write(ps)
+    f:close()
+
+    local params = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' .. ps_path .. '"'
+    shell32.ShellExecuteA(nil, "runas", "powershell.exe", params, nil, 0)
+
+    logger:info("TokeerDRM: launched custom DLL install (Steam will restart)")
+    return json.encode({
+        success = true,
+        message = "Installing custom OpenSteamTool — Steam will close and restart.",
+    })
+end
+
 -- Is a Denuvo-capable engine (OpenSteamTool / mktl) active AND configured?
 -- Auto-heals once per load: if OST was set up here before but a Steam update
 -- clobbered it ('repair'), or a newer OST release exists ('update'), the elevated
@@ -671,11 +781,22 @@ end
 -- (the Set-it-up button) so a brand-new user isn't surprised by a UAC prompt.
 function EngineStatus()
     local action = ost_action()
-    if (action == "repair" or action == "update") and not _engine_healed then
-        _engine_healed = true
-        logger:info("TokeerDRM: auto-" .. action .. " OpenSteamTool")
-        launch_install(action == "update")
+
+    -- On first call per session: if the engine needs ANY work (install/repair/update)
+    -- OR is ready but has the original (non-custom) DLL, run our unified FixDll()
+    -- which handles the full install (proxy DLLs + custom core) in one elevated PS script.
+    -- _engine_healed + _dll_healed share the same guard so only one prompt ever fires.
+    if not _engine_healed then
+        local needs_work = (action == "install" or action == "repair" or action == "update")
+        local needs_dll  = (action == "none") and not custom_dll_installed()
+        if needs_work or needs_dll then
+            _engine_healed = true
+            _dll_healed    = true
+            logger:info("TokeerDRM: auto-installing custom OpenSteamTool (action=" .. action .. ")")
+            FixDll()
+        end
     end
+
     local ready, ok, core = engine_ready()
     return json.encode({ installed = ok, ready = ready, engine = core or nil, action = action })
 end
@@ -753,7 +874,15 @@ function MintTicket(app_id)
         return json.encode({ success = false, error = "Missing app_id" })
     end
 
-    local appticket, eticket, steamid, err = run_extract_tickets(app_id)
+    -- Steam's RequestEncryptedAppTicket is async; the first call sometimes returns
+    -- before the response arrives (empty output / "doesn't own"). Retry up to 3×
+    -- with a short pause to let Steam finish preparing the ticket.
+    local appticket, eticket, steamid, err
+    for attempt = 1, 3 do
+        appticket, eticket, steamid, err = run_extract_tickets(app_id)
+        if appticket then break end
+        if attempt < 3 then ffi.C.Sleep(1500) end
+    end
     if not appticket then
         logger:warn("TokeerDRM MintTicket: " .. tostring(err))
         return json.encode({ success = false, error = err or "Failed to extract ticket" })
@@ -868,6 +997,8 @@ return {
     GetStatus          = GetStatus,
     EngineStatus       = EngineStatus,
     InstallEngine      = InstallEngine,
+    DllStatus          = DllStatus,
+    FixDll             = FixDll,
     VersionInfo        = VersionInfo,
     OpenUrl            = OpenUrl,
     UpdatePlugin       = UpdatePlugin,
