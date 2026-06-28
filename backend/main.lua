@@ -455,11 +455,55 @@ local function latest_ost_tag()
     return nil
 end
 
--- True when our custom OpenSteamTool.dll is installed (marker + DLL both present).
+local function dll_file_size(path)
+    local f = io.open(path, "rb")
+    if not f then return 0 end
+    local sz = f:seek("end") or 0
+    f:close()
+    return sz
+end
+
+-- True when our custom OpenSteamTool.dll is installed — exact size match (fast path)
+-- or installed DLL size matches any .dll asset in the tagged release (accepts both
+-- Release and Debug builds without downloading anything).
 local function custom_dll_installed()
-    local dir = steam_dir()
-    return file_exists(dir .. "\\" .. CUSTOM_DLL_MARKER)
-       and file_exists(dir .. "\\OpenSteamTool.dll")
+    local dir         = steam_dir()
+    local dll_path    = dir .. "\\OpenSteamTool.dll"
+    local marker_path = dir .. "\\" .. CUSTOM_DLL_MARKER
+    if not file_exists(marker_path) or not file_exists(dll_path) then
+        return false
+    end
+    local mf = io.open(marker_path, "r")
+    if not mf then return false end
+    local line = (mf:read("*l") or ""):gsub("%s+$", "")
+    mf:close()
+    -- Marker format: "<sha256>:<size>:<tag>"
+    local stored_size = tonumber(line:match("^[^:]+:(%d+)")) or 0
+    local stored_tag  = line:match(":([^:]+)$") or ""
+    if stored_size == 0 then return false end  -- old/invalid marker
+    local actual_size = dll_file_size(dll_path)
+    if actual_size == stored_size then return true end  -- fast path
+    -- Size mismatch (e.g. tester swapped in the Debug build). Accept if the
+    -- installed DLL's size matches any .dll asset in the tagged release.
+    if stored_tag ~= "" then
+        local tag_url = CUSTOM_OST_API:gsub("/releases/latest$", "/releases/tags/" .. stored_tag)
+        local ok, resp = pcall(http.request, tag_url, {
+            method = "GET",
+            headers = { ["User-Agent"] = "TokeerDRM", ["Accept"] = "application/vnd.github+json" },
+            timeout = 8,
+        })
+        if ok and resp and resp.status == 200 then
+            local ok2, rel = pcall(json.decode, resp.body or "")
+            if ok2 and rel and rel.assets then
+                for _, a in ipairs(rel.assets) do
+                    if (a.name or ""):lower():match("%.dll$") and a.size == actual_size then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
 end
 
 -- True when OpenSteamTool is fully active: core present, hijack proxies in place,
@@ -674,12 +718,38 @@ function UpdatePlugin()
     return json.encode({ success = true, message = "Updating… approve the prompt. Steam will restart, then reopen the TokeerDRM tab." })
 end
 
+local function custom_dll_stored_tag()
+    local dir = steam_dir()
+    local marker_path = dir .. "\\" .. CUSTOM_DLL_MARKER
+    local mf = io.open(marker_path, "r")
+    if not mf then return "" end
+    local line = (mf:read("*l") or ""):gsub("%s+$", "")
+    mf:close()
+    -- format: hash:size:tag
+    return line:match(":([^:]+)$") or ""
+end
+
+local function custom_dll_needs_update()
+    local stored_tag = custom_dll_stored_tag()
+    if stored_tag == "" then return false end
+    local ok, resp = pcall(http.request, CUSTOM_OST_API, {
+        method = "GET", headers = { ["User-Agent"] = "TokeerDRM", ["Accept"] = "application/vnd.github+json" }, timeout = 8,
+    })
+    if not ok or not resp or resp.status ~= 200 then return false end
+    local ok2, rel = pcall(json.decode, resp.body or "")
+    if not ok2 or not rel then return false end
+    local latest_tag = rel.tag_name or ""
+    return latest_tag ~= "" and latest_tag ~= stored_tag
+end
+
 function DllStatus()
     local custom = custom_dll_installed()
     local _, installed = engine_present()
+    local needs_update = custom and custom_dll_needs_update()
     return json.encode({
         custom_installed = custom,
-        needs_fix = installed and not custom,
+        needs_fix    = installed and not custom,
+        needs_update = needs_update,
     })
 end
 
@@ -745,7 +815,10 @@ function FixDll()
         "  Start-Sleep 3",
         "  Add-MpPreference -ExclusionPath $sd -ErrorAction SilentlyContinue",
         "  Copy-Item -Force $tmpDll \"$sd\\OpenSteamTool.dll\"",
-        "  Set-Content -Path \"$sd\\" .. CUSTOM_DLL_MARKER .. "\" -Value 'custom'",
+        "  $dllHash = (Get-FileHash \"$sd\\OpenSteamTool.dll\" -Algorithm SHA256).Hash.ToLower()",
+        "  $dllSize = (Get-Item \"$sd\\OpenSteamTool.dll\").Length",
+        "  $dllTag  = $crel.tag_name",
+        "  Set-Content -Path \"$sd\\" .. CUSTOM_DLL_MARKER .. "\" -Value \"${dllHash}:${dllSize}:${dllTag}\"",
         "",
         "  # Ensure toml points at config\\stplug-in",
         "  $toml = \"$sd\\opensteamtool.toml\"",
