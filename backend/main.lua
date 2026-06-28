@@ -45,7 +45,7 @@ local function load_server_url()
 end
 
 local SERVER_URL = load_server_url()
-local PLUGIN_VERSION = "1.0.13"               -- bump on every release
+local PLUGIN_VERSION = "1.0.14"               -- bump on every release
 local UPDATE_REPO    = "Tesla697/TokeerDRM"  -- latest release here force-gates the plugin
 
 -- ── FFI: Windows Registry (advapi32) ─────────────────────────────────────────
