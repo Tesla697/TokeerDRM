@@ -45,7 +45,7 @@ local function load_server_url()
 end
 
 local SERVER_URL = load_server_url()
-local PLUGIN_VERSION = "1.0.12"               -- bump on every release
+local PLUGIN_VERSION = "1.0.13"               -- bump on every release
 local UPDATE_REPO    = "Tesla697/TokeerDRM"  -- latest release here force-gates the plugin
 
 -- ── FFI: Windows Registry (advapi32) ─────────────────────────────────────────
@@ -837,6 +837,18 @@ function RedeemCode(app_id, code)
             error = installed
                 and "OpenSteamTool isn't set up yet — finish setup/repair on the TokeerDRM tab, then redeem."
                 or  "OpenSteamTool isn't installed — install it on the TokeerDRM tab, then redeem.",
+        })
+    end
+
+    -- Gate on custom DLL: the enhanced build is required for full compatibility.
+    -- EngineStatus() auto-triggers the fix, but until Steam restarts with the
+    -- new DLL the user should wait rather than burn a one-use code on a session
+    -- that might give 012.
+    if not custom_dll_installed() then
+        return json.encode({
+            success = false,
+            dll_fix  = true,
+            error    = "The enhanced OpenSteamTool DLL is being installed — Steam is restarting. Once Steam is back, redeem your code.",
         })
     end
 
