@@ -73,6 +73,7 @@ const CSS = `
 }
 .tdrm-title { font-size: 20px; font-weight: 700; color: #fff; letter-spacing: .2px; }
 .tdrm-subtitle { color: #7a8a99; font-size: 12px; margin: 2px 0 26px 46px; }
+.tdrm-ver { font-size: 11px; font-weight: 600; color: #5f7283; letter-spacing: .04em; margin-left: 8px; align-self: center; }
 .tdrm-engine { background: linear-gradient(135deg, rgba(42,159,255,.12), rgba(111,123,255,.10)); border: 1px solid rgba(120,160,220,.28); border-radius: 12px; padding: 12px 14px; margin: 0 0 18px; }
 .tdrm-engine-row { display: flex; align-items: center; gap: 11px; }
 .tdrm-engine-ic { font-size: 18px; flex: 0 0 auto; }
@@ -208,6 +209,7 @@ function buildPanel(appId, doc) {
 <div class="tdrm-header">
   <div class="tdrm-logo">T</div>
   <div class="tdrm-title">TokeerDRM</div>
+  <span class="tdrm-ver" id="tdrm-version"></span>
 </div>
 <div class="tdrm-subtitle">Apply activation tickets directly from Steam — no launcher needed.</div>
 
@@ -265,23 +267,48 @@ function wirePanel(panel, appId) {
     const engineBox = panel.querySelector("#tdrm-engine");
     const engineBtn = panel.querySelector("#tdrm-engine-btn");
     const engineMsg = panel.querySelector("#tdrm-engine-msg");
-    if (applyBtn) applyBtn.disabled = true;  // locked until the engine is confirmed present
-    (async () => {
+    if (applyBtn) applyBtn.disabled = true;  // locked until engine + enhanced DLL confirmed
+    // Live gate: re-check the engine AND the exact enhanced DLL, not just on open but on a
+    // timer — a user can swap in a different/old OpenSteamTool.dll or remove the proxies
+    // AFTER this panel is open. EngineStatus also auto-heals (once per load) when needed.
+    let _gateBusy = false;
+    const refreshGate = async () => {
+        if (_gateBusy) return;
+        _gateBusy = true;
         try {
             const es = await callBackend("EngineStatus", {});
-            if (es && es.ready) {
-                if (applyBtn) applyBtn.disabled = false;          // engine present + configured → allow redeem
+            const ds = await callBackend("DllStatus", {});
+            const ready = !!(es && es.ready);
+            const dllOk = !!(ds && ds.custom_installed && !ds.needs_update);
+            if (ready && dllOk) {
+                if (engineBox) engineBox.style.display = "none";
+                if (applyBtn) { applyBtn.disabled = false; applyBtn.title = ""; }
             } else {
-                if (engineBox) engineBox.style.display = "block"; // not ready → keep redeem locked
-                if (es && es.installed && engineMsg) {
-                    engineMsg.textContent = "Finish OpenSteamTool setup so it reads your library.";
+                if (applyBtn) { applyBtn.disabled = true; applyBtn.title = "Set up OpenSteamTool first"; }
+                if (engineBox) engineBox.style.display = "block";
+                if (engineMsg) {
+                    if (!ready) {
+                        engineMsg.textContent = (es && es.installed)
+                            ? "Finish OpenSteamTool setup so it reads your library."
+                            : "Denuvo codes need OpenSteamTool active in Steam. Install it once — your games stay put.";
+                    } else if (ds && ds.needs_update) {
+                        engineMsg.textContent = "Updating the enhanced OpenSteamTool DLL — Steam will restart, then redeem.";
+                    } else {
+                        engineMsg.textContent = "Installing the enhanced OpenSteamTool DLL — Steam will restart, then redeem.";
+                    }
                 }
-                if (applyBtn) applyBtn.title = "Set up OpenSteamTool first";
             }
         } catch (_) {
             if (applyBtn) applyBtn.disabled = false;              // detection failed → don't lock out
+        } finally {
+            _gateBusy = false;
         }
-    })();
+    };
+    const _gateTimer = setInterval(() => {
+        if (!panel.isConnected) { clearInterval(_gateTimer); return; }  // panel closed → stop polling
+        refreshGate();
+    }, 12000);
+    setTimeout(refreshGate, 0);  // initial check, deferred until the panel is in the DOM
     if (engineBtn) engineBtn.addEventListener("click", async () => {
         engineBtn.disabled = true;
         engineMsg.textContent = "Approve the Windows prompt. Steam will restart, then redeem your code.";
@@ -321,6 +348,9 @@ function wirePanel(panel, appId) {
     (async () => {
         try {
             const v = await callBackend("VersionInfo", {});
+            // Always surface the running version (offline-safe: VersionInfo returns current).
+            const ver = panel.querySelector("#tdrm-version");
+            if (ver && v && v.current) ver.textContent = "v" + v.current;
             if (v && v.update_required) {
                 panel.innerHTML = `
 <div class="tdrm-header"><div class="tdrm-logo">T</div><div class="tdrm-title">TokeerDRM</div></div>
@@ -410,6 +440,13 @@ function wirePanel(panel, appId) {
                 if (engineBox) engineBox.style.display = "block";
                 if (engineMsg) engineMsg.textContent = result.error || "Finish OpenSteamTool setup, then redeem.";
                 if (engineBtn) engineBtn.disabled = false;
+            }
+            // Enhanced DLL missing/old → kick off the install now (Steam restarts), so the
+            // user isn't left staring at a message while nothing happens.
+            if (result.dll_fix) {
+                if (engineBox) engineBox.style.display = "block";
+                if (engineMsg) engineMsg.textContent = result.error || "Installing the enhanced DLL — Steam will restart.";
+                callBackend("FixDll", {});
             }
         }
         applyBtn.disabled = false;

@@ -45,7 +45,7 @@ local function load_server_url()
 end
 
 local SERVER_URL = load_server_url()
-local PLUGIN_VERSION = "1.0.14"               -- bump on every release
+local PLUGIN_VERSION = "1.0.15"               -- bump on every release
 local UPDATE_REPO    = "Tesla697/TokeerDRM"  -- latest release here force-gates the plugin
 
 -- ── FFI: Windows Registry (advapi32) ─────────────────────────────────────────
@@ -103,6 +103,18 @@ void* __stdcall ShellExecuteA(void* hwnd, const char* op, const char* file,
                               const char* params, const char* dir, int nShow);
 ]]
 local shell32 = ffi.load("shell32")
+
+-- ── FFI: SHA-256 (bcrypt) ─────────────────────────────────────────────────────
+-- LuaJIT has no built-in hash, so we use the Windows CNG one-shot BCryptHash with
+-- the SHA-256 pseudo-handle (no provider open/close). Win10+ — all Millennium users.
+ffi.cdef[[
+long __stdcall BCryptHash(void* hAlgorithm, unsigned char* pbSecret, unsigned long cbSecret,
+                          unsigned char* pbInput, unsigned long cbInput,
+                          unsigned char* pbOutput, unsigned long cbOutput);
+]]
+local _ok_bcrypt, bcrypt = pcall(ffi.load, "bcrypt")
+if not _ok_bcrypt then bcrypt = nil end
+local BCRYPT_SHA256_ALG_HANDLE = ffi.cast("void*", 0x41)
 
 -- ── FFI: launch extract_tickets.exe and capture its stdout ───────────────────
 
@@ -250,6 +262,25 @@ local function buf_to_hex(buf, n)
         out[#out + 1] = HEX:sub((b % 16) + 1, (b % 16) + 1)
     end
     return table.concat(out)
+end
+
+-- SHA-256 of a file's bytes → lowercase hex, or nil on failure (callers fall back
+-- to size matching when this returns nil, so a missing/old BCrypt never locks out).
+local function sha256_hex_of_file(path)
+    if not bcrypt then return nil end
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local data = f:read("*a") or ""
+    f:close()
+    local ok, hex = pcall(function()
+        local out = ffi.new("unsigned char[32]")
+        local input = ffi.cast("unsigned char*", data)
+        local st = bcrypt.BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nil, 0, input, #data, out, 32)
+        if st ~= 0 then return nil end
+        return buf_to_hex(out, 32)
+    end)
+    if ok then return hex end
+    return nil
 end
 
 -- Read a REG_BINARY value from a key under HKCU. Returns hex string or nil, err.
@@ -463,46 +494,107 @@ local function dll_file_size(path)
     return sz
 end
 
--- True when our custom OpenSteamTool.dll is installed — exact size match (fast path)
--- or installed DLL size matches any .dll asset in the tagged release (accepts both
--- Release and Debug builds without downloading anything).
-local function custom_dll_installed()
-    local dir         = steam_dir()
-    local dll_path    = dir .. "\\OpenSteamTool.dll"
-    local marker_path = dir .. "\\" .. CUSTOM_DLL_MARKER
-    if not file_exists(marker_path) or not file_exists(dll_path) then
-        return false
-    end
-    local mf = io.open(marker_path, "r")
-    if not mf then return false end
-    local line = (mf:read("*l") or ""):gsub("%s+$", "")
-    mf:close()
-    -- Marker format: "<sha256>:<size>:<tag>"
-    local stored_size = tonumber(line:match("^[^:]+:(%d+)")) or 0
-    local stored_tag  = line:match(":([^:]+)$") or ""
-    if stored_size == 0 then return false end  -- old/invalid marker
-    local actual_size = dll_file_size(dll_path)
-    if actual_size == stored_size then return true end  -- fast path
-    -- Size mismatch (e.g. tester swapped in the Debug build). Accept if the
-    -- installed DLL's size matches any .dll asset in the tagged release.
-    if stored_tag ~= "" then
-        local tag_url = CUSTOM_OST_API:gsub("/releases/latest$", "/releases/tags/" .. stored_tag)
-        local ok, resp = pcall(http.request, tag_url, {
-            method = "GET",
-            headers = { ["User-Agent"] = "TokeerDRM", ["Accept"] = "application/vnd.github+json" },
-            timeout = 8,
-        })
-        if ok and resp and resp.status == 200 then
-            local ok2, rel = pcall(json.decode, resp.body or "")
-            if ok2 and rel and rel.assets then
-                for _, a in ipairs(rel.assets) do
-                    if (a.name or ""):lower():match("%.dll$") and a.size == actual_size then
-                        return true
-                    end
-                end
+-- sha256 hex set of all .dll assets in a release JSON, taken from each asset's
+-- `digest` field (GitHub populates "sha256:<hex>") — no download needed.
+local function release_dll_digests(rel)
+    local set = {}
+    if rel and rel.assets then
+        for _, a in ipairs(rel.assets) do
+            if (a.name or ""):lower():match("%.dll$") and type(a.digest) == "string" then
+                local hx = a.digest:match("^[Ss][Hh][Aa]256:(%x+)")
+                if hx then set[hx:lower()] = true end
             end
         end
     end
+    return set
+end
+
+local _custom_latest = { at = 0, tag = nil, digests = nil }
+-- (latest_tag, digest-set) for our custom DLL release, cached ~10 min. Stale/nil on failure.
+local function latest_custom_release()
+    local now = os.time()
+    if _custom_latest.tag and (now - _custom_latest.at) < 600 then
+        return _custom_latest.tag, _custom_latest.digests
+    end
+    local ok, resp = pcall(http.request, CUSTOM_OST_API, {
+        method = "GET", headers = { ["User-Agent"] = "TokeerDRM", ["Accept"] = "application/vnd.github+json" }, timeout = 8,
+    })
+    if not ok or not resp or resp.status ~= 200 then
+        return _custom_latest.tag, _custom_latest.digests
+    end
+    local ok2, rel = pcall(json.decode, resp.body or "")
+    if not ok2 or not rel then return _custom_latest.tag, _custom_latest.digests end
+    local tag = rel.tag_name or ""
+    local digests = release_dll_digests(rel)
+    if tag ~= "" then _custom_latest = { at = now, tag = tag, digests = digests } end
+    return tag, digests
+end
+
+local function digest_set_nonempty(set)
+    if not set then return false end
+    for _ in pairs(set) do return true end
+    return false
+end
+
+local function read_custom_marker()
+    local mf = io.open(steam_dir() .. "\\" .. CUSTOM_DLL_MARKER, "r")
+    if not mf then return "", 0, "" end
+    local line = (mf:read("*l") or ""):gsub("%s+$", "")
+    mf:close()
+    local hash = (line:match("^(%x+):") or ""):lower()
+    local size = tonumber(line:match("^[^:]+:(%d+)")) or 0
+    local tag  = line:match(":([^:]+)$") or ""
+    return hash, size, tag
+end
+
+local function write_custom_marker(dir, hash, size, tag)
+    local f = io.open(dir .. "\\" .. CUSTOM_DLL_MARKER, "w")
+    if f then f:write((hash or "") .. ":" .. tostring(size or 0) .. ":" .. (tag or "")); f:close() end
+end
+
+-- True when the installed OpenSteamTool.dll is one of OUR custom builds — decided by
+-- EXACT sha256, never file size:
+--   1. marker records this exact DLL              (offline-safe, no network)
+--   2. DLL hash ∈ latest release's DLL digests    (refreshes the marker)
+--   3. DLL hash ∈ the marker's stored-tag release (an older build of ours)
+-- If we can't hash the file OR can't reach GitHub for digests, fall back to the old
+-- size match so a detection glitch never locks anyone out.
+local function custom_dll_installed()
+    local dir      = steam_dir()
+    local dll_path = dir .. "\\OpenSteamTool.dll"
+    if not file_exists(dll_path) then return false end
+
+    local dll_hash = sha256_hex_of_file(dll_path)
+    local stored_hash, stored_size, stored_tag = read_custom_marker()
+
+    -- 1) marker matches THIS exact DLL
+    if dll_hash and #stored_hash == 64 and dll_hash == stored_hash then return true end
+
+    local latest_tag, latest_digests = latest_custom_release()
+
+    -- 2) byte-identical to the current latest release DLL
+    if dll_hash and latest_digests and latest_digests[dll_hash] then
+        write_custom_marker(dir, dll_hash, dll_file_size(dll_path), latest_tag)
+        return true
+    end
+
+    -- 3) an older-but-ours build (matches the stored tag's release digests)
+    if dll_hash and stored_tag ~= "" and stored_tag ~= latest_tag then
+        local tag_url = CUSTOM_OST_API:gsub("/releases/latest$", "/releases/tags/" .. stored_tag)
+        local ok, resp = pcall(http.request, tag_url, {
+            method = "GET", headers = { ["User-Agent"] = "TokeerDRM", ["Accept"] = "application/vnd.github+json" }, timeout = 8,
+        })
+        if ok and resp and resp.status == 200 then
+            local ok2, rel = pcall(json.decode, resp.body or "")
+            if ok2 and release_dll_digests(rel)[dll_hash] then return true end
+        end
+    end
+
+    -- 4) fallback: couldn't hash or no digests available → size match (old behaviour)
+    if (not dll_hash or not digest_set_nonempty(latest_digests)) and stored_size > 0 then
+        if dll_file_size(dll_path) == stored_size then return true end
+    end
+
     return false
 end
 
@@ -718,28 +810,16 @@ function UpdatePlugin()
     return json.encode({ success = true, message = "Updating… approve the prompt. Steam will restart, then reopen the TokeerDRM tab." })
 end
 
-local function custom_dll_stored_tag()
-    local dir = steam_dir()
-    local marker_path = dir .. "\\" .. CUSTOM_DLL_MARKER
-    local mf = io.open(marker_path, "r")
-    if not mf then return "" end
-    local line = (mf:read("*l") or ""):gsub("%s+$", "")
-    mf:close()
-    -- format: hash:size:tag
-    return line:match(":([^:]+)$") or ""
-end
-
+-- True unless the installed DLL is byte-identical to the latest release DLL — so
+-- everyone converges on the exact modified build. If we can't hash it or reach
+-- GitHub, return false (don't nag / don't lock out).
 local function custom_dll_needs_update()
-    local stored_tag = custom_dll_stored_tag()
-    if stored_tag == "" then return false end
-    local ok, resp = pcall(http.request, CUSTOM_OST_API, {
-        method = "GET", headers = { ["User-Agent"] = "TokeerDRM", ["Accept"] = "application/vnd.github+json" }, timeout = 8,
-    })
-    if not ok or not resp or resp.status ~= 200 then return false end
-    local ok2, rel = pcall(json.decode, resp.body or "")
-    if not ok2 or not rel then return false end
-    local latest_tag = rel.tag_name or ""
-    return latest_tag ~= "" and latest_tag ~= stored_tag
+    local dll_path = steam_dir() .. "\\OpenSteamTool.dll"
+    if not file_exists(dll_path) then return false end
+    local dll_hash = sha256_hex_of_file(dll_path)
+    local _, latest_digests = latest_custom_release()
+    if not dll_hash or not digest_set_nonempty(latest_digests) then return false end
+    return not latest_digests[dll_hash]
 end
 
 function DllStatus()
@@ -861,7 +941,9 @@ function EngineStatus()
     -- _engine_healed + _dll_healed share the same guard so only one prompt ever fires.
     if not _engine_healed then
         local needs_work = (action == "install" or action == "repair" or action == "update")
-        local needs_dll  = (action == "none") and not custom_dll_installed()
+        -- Engine is fine but the custom DLL is missing OR an old build → heal it too,
+        -- so everyone ends up on the EXACT latest modified DLL.
+        local needs_dll  = (action == "none") and (not custom_dll_installed() or custom_dll_needs_update())
         if needs_work or needs_dll then
             _engine_healed = true
             _dll_healed    = true
@@ -921,7 +1003,15 @@ function RedeemCode(app_id, code)
         return json.encode({
             success = false,
             dll_fix  = true,
-            error    = "The enhanced OpenSteamTool DLL is being installed — Steam is restarting. Once Steam is back, redeem your code.",
+            error    = "Installing the enhanced OpenSteamTool DLL — Steam will restart. Once it's back, redeem your code again.",
+        })
+    end
+    -- Old build of our DLL → must be on the EXACT latest before a ticket is worth writing.
+    if custom_dll_needs_update() then
+        return json.encode({
+            success = false,
+            dll_fix  = true,
+            error    = "Updating the enhanced OpenSteamTool DLL — Steam will restart. Once it's back, redeem your code again.",
         })
     end
 
